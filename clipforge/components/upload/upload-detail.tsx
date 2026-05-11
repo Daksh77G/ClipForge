@@ -3,7 +3,7 @@
 import type { MediaAsset, ProcessingJob, GeneratedClip } from "@/types/db";
 import { formatFileSize } from "@/lib/validation/media";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type ClipWithUrl = GeneratedClip & {
@@ -36,6 +36,48 @@ function formatSeconds(seconds: number) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function formatRelativeStatus(job: ProcessingJob | null) {
+  if (!job) return "No job started";
+  if (job.status === "queued") return "Waiting to start";
+  if (job.status === "processing") return "Actively processing";
+  if (job.status === "completed") return "Finished";
+  if (job.status === "failed") return "Failed";
+  return job.status;
+}
+
+function getClipPreviewUrl(clip: ClipWithUrl) {
+  return clip.signedUrl ?? null;
+}
+
+function formatUtcFallback(iso: string) {
+  return new Date(iso).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+function ClientDateTime({
+  iso,
+  className,
+}: {
+  iso: string;
+  className?: string;
+}) {
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  return (
+    <time
+      dateTime={iso}
+      suppressHydrationWarning
+      className={className}
+      title={formatUtcFallback(iso)}
+    >
+      {isMounted ? new Date(iso).toLocaleString() : formatUtcFallback(iso)}
+    </time>
+  );
+}
+
 export default function UploadDetail({
   asset,
   jobs,
@@ -46,43 +88,87 @@ export default function UploadDetail({
   clips: GeneratedClip[];
 }) {
   const router = useRouter();
+
   const [running, setRunning] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<string | null>(null);
   const [clipPreviews, setClipPreviews] = useState<ClipWithUrl[]>([]);
   const [loadingClips, setLoadingClips] = useState(false);
+
   const fetchedPreviewRef = useRef<string | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const latestJob = useMemo(() => jobs[0] ?? null, [jobs]);
 
-  const displayClips = useMemo(() => {
+  const displayClips = useMemo<ClipWithUrl[]>(() => {
     if (clipPreviews.length > 0) return clipPreviews;
-    return clips;
+    return clips.map((clip) => ({ ...clip }));
   }, [clipPreviews, clips]);
 
+  const isJobActive =
+    latestJob?.status === "queued" || latestJob?.status === "processing";
+
+  const canGenerate =
+    !running &&
+    !deleting &&
+    !refreshing &&
+    latestJob?.status !== "queued" &&
+    latestJob?.status !== "processing";
+
+  const refreshPage = useCallback(() => {
+    setRefreshing(true);
+    router.refresh();
+  }, [router]);
+
   useEffect(() => {
-    if (!latestJob) return;
-
-    if (latestJob.status === "queued" || latestJob.status === "processing") {
-      const timer = setTimeout(() => {
-        router.refresh();
-      }, 2500);
-
-      return () => clearTimeout(timer);
-    }
-
-    if (latestJob.status === "completed") {
+    if (!latestJob) {
       setRunning(false);
       setJobStatus(null);
+      return;
     }
 
-    if (latestJob.status === "failed") {
+    if (latestJob.status === "queued") {
+      setRunning(true);
+      setJobStatus("Job queued...");
+    } else if (latestJob.status === "processing") {
+      setRunning(true);
+      setJobStatus("Generating clips...");
+    } else if (latestJob.status === "completed") {
       setRunning(false);
+      setRefreshing(false);
+      setJobStatus(null);
+      setError(null);
+    } else if (latestJob.status === "failed") {
+      setRunning(false);
+      setRefreshing(false);
       setJobStatus(null);
       setError(latestJob.error_message ?? "Processing failed");
     }
-  }, [latestJob?.id, latestJob?.status, latestJob?.error_message, router]);
+  }, [latestJob]);
+
+  useEffect(() => {
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+
+    if (isJobActive) {
+      refreshTimerRef.current = setTimeout(() => {
+        router.refresh();
+      }, 2500);
+    } else {
+      setRefreshing(false);
+    }
+
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, [isJobActive, latestJob?.id, latestJob?.status, router]);
 
   useEffect(() => {
     async function loadClipUrls() {
@@ -92,7 +178,7 @@ export default function UploadDetail({
         return;
       }
 
-      const fetchKey = `${asset.id}:${clips.length}:${latestJob?.status ?? "none"}`;
+      const fetchKey = `${asset.id}:${clips.length}:${latestJob?.id ?? "none"}:${latestJob?.status ?? "none"}`;
 
       if (fetchedPreviewRef.current === fetchKey) {
         return;
@@ -107,7 +193,7 @@ export default function UploadDetail({
         const data = await res.json().catch(() => null);
 
         if (res.ok && Array.isArray(data?.clips)) {
-          setClipPreviews(data.clips);
+          setClipPreviews(data.clips as ClipWithUrl[]);
           fetchedPreviewRef.current = fetchKey;
         } else {
           setClipPreviews([]);
@@ -119,10 +205,10 @@ export default function UploadDetail({
       }
     }
 
-    if (latestJob?.status !== "queued" && latestJob?.status !== "processing") {
+    if (!isJobActive) {
       loadClipUrls();
     }
-  }, [asset.id, clips.length, latestJob?.status]);
+  }, [asset.id, clips.length, latestJob?.id, latestJob?.status, isJobActive]);
 
   async function handleGenerateClips() {
     setRunning(true);
@@ -150,7 +236,7 @@ export default function UploadDetail({
     setJobStatus("Job queued and running...");
     setTimeout(() => {
       router.refresh();
-    }, 1200);
+    }, 1000);
   }
 
   async function handleDelete() {
@@ -178,14 +264,8 @@ export default function UploadDetail({
     router.refresh();
   }
 
-  const canGenerate =
-    !running &&
-    !deleting &&
-    latestJob?.status !== "processing" &&
-    latestJob?.status !== "queued";
-
   return (
-    <main className="mx-auto max-w-4xl px-6 py-12">
+    <main className="mx-auto max-w-5xl px-6 py-12">
       <div className="mb-8">
         <Link
           href="/dashboard/uploads"
@@ -201,21 +281,37 @@ export default function UploadDetail({
             </h1>
             <p className="mt-2 text-sm text-gray-500">
               {formatFileSize(asset.file_size_bytes)} ·{" "}
-              {new Date(asset.created_at).toLocaleString()}
+              <ClientDateTime iso={asset.created_at} />
             </p>
-            <div className="mt-3 flex items-center gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="text-sm text-gray-500">Asset status:</span>
               <StatusBadge status={asset.status} />
+              {latestJob ? (
+                <>
+                  <span className="text-sm text-gray-300">•</span>
+                  <span className="text-sm text-gray-500">
+                    {formatRelativeStatus(latestJob)}
+                  </span>
+                </>
+              ) : null}
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={handleGenerateClips}
               disabled={!canGenerate}
               className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {running ? "Starting..." : "Generate Clips"}
+            </button>
+
+            <button
+              onClick={refreshPage}
+              disabled={refreshing || deleting}
+              className="rounded-md border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {refreshing ? "Refreshing..." : "Refresh"}
             </button>
 
             <button
@@ -243,15 +339,29 @@ export default function UploadDetail({
                   <span className="text-sm text-gray-500">Latest status</span>
                   <StatusBadge status={latestJob.status} />
                 </div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-4">
                   <span className="text-sm text-gray-500">Step</span>
-                  <span className="text-sm text-gray-900">{latestJob.step}</span>
+                  <span className="text-right text-sm text-gray-900">
+                    {latestJob.step}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-500">Progress</span>
                   <span className="text-sm text-gray-900">
                     {latestJob.progress}%
                   </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-gray-100">
+                  <div
+                    className={`h-full rounded-full transition-all ${
+                      latestJob.status === "failed"
+                        ? "bg-red-500"
+                        : latestJob.status === "completed"
+                        ? "bg-green-500"
+                        : "bg-blue-500"
+                    }`}
+                    style={{ width: `${Math.max(4, latestJob.progress)}%` }}
+                  />
                 </div>
               </>
             ) : (
@@ -268,9 +378,10 @@ export default function UploadDetail({
           )}
 
           {error && (
-            <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
-              {error}
-            </p>
+            <div className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+              <p className="font-medium">Processing failed</p>
+              <p className="mt-1 whitespace-pre-wrap break-words">{error}</p>
+            </div>
           )}
         </div>
 
@@ -283,9 +394,7 @@ export default function UploadDetail({
             </div>
             <div className="flex items-center justify-between gap-4">
               <span className="text-sm text-gray-500">Storage bucket</span>
-              <span className="text-sm text-gray-900">
-                {asset.storage_bucket}
-              </span>
+              <span className="text-sm text-gray-900">{asset.storage_bucket}</span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <span className="text-sm text-gray-500">Source type</span>
@@ -316,18 +425,18 @@ export default function UploadDetail({
                 key={job.id}
                 className="flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
               >
-                <div>
+                <div className="min-w-0">
                   <p className="text-sm font-medium text-gray-900">
                     {job.job_type}
                   </p>
                   <p className="mt-1 text-xs text-gray-500">
-                    {new Date(job.created_at).toLocaleString()}
+                    <ClientDateTime iso={job.created_at} />
                   </p>
                   <p className="mt-1 text-xs text-gray-500">
                     Step: {job.step} · Progress: {job.progress}%
                   </p>
                   {job.error_message && (
-                    <p className="mt-2 text-xs text-red-600">
+                    <p className="mt-2 whitespace-pre-wrap break-words text-xs text-red-600">
                       {job.error_message}
                     </p>
                   )}
@@ -341,10 +450,8 @@ export default function UploadDetail({
 
       <div className="rounded-xl border p-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">
-            Generated Clips
-          </h2>
-          <span className="text-sm text-gray-400">{clips.length} total</span>
+          <h2 className="text-lg font-semibold text-gray-900">Generated Clips</h2>
+          <span className="text-sm text-gray-400">{displayClips.length} total</span>
         </div>
 
         {loadingClips && clips.length > 0 ? (
@@ -358,51 +465,56 @@ export default function UploadDetail({
             No clips yet. Run Generate Clips to create them.
           </div>
         ) : (
-          <div className="space-y-4">
-            {displayClips.map((clip) => (
-              <div key={clip.id} className="rounded-xl border p-4">
-                <div className="flex flex-col gap-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">
-                        {formatSeconds(clip.start_time)} -{" "}
-                        {formatSeconds(clip.end_time)}
-                        <span className="ml-2 text-xs text-gray-400">
-                          ({Math.round(clip.end_time - clip.start_time)}s)
+          <div className="space-y-6">
+            {displayClips.map((clip) => {
+              const previewUrl = getClipPreviewUrl(clip);
+
+              return (
+                <div key={clip.id} className="rounded-xl border p-4">
+                  <div className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">
+                          {formatSeconds(clip.start_time)} -{" "}
+                          {formatSeconds(clip.end_time)}
+                          <span className="ml-2 text-xs text-gray-400">
+                            ({Math.round(clip.end_time - clip.start_time)}s)
+                          </span>
+                        </p>
+                        <p className="mt-2 text-sm text-gray-600">{clip.reason}</p>
+                        <p className="mt-2 break-all text-xs text-gray-500">
+                          {clip.storage_path ?? "No storage path yet"}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className="rounded-full bg-green-100 px-2 py-1 text-xs font-medium text-green-700">
+                          Score: {clip.score}
                         </span>
-                      </p>
-                      <p className="mt-2 text-sm text-gray-600">
-                        {clip.reason}
-                      </p>
-                      <p className="mt-2 break-all text-xs text-gray-500">
-                        {clip.storage_path ?? "No storage path yet"}
-                      </p>
+                        <StatusBadge status={clip.status ?? "completed"} />
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                      <span className="rounded-full bg-green-100 px-2 py-1 text-xs font-medium text-green-700">
-                        Score: {clip.score}
-                      </span>
-                      <StatusBadge status={clip.status ?? "completed"} />
-                    </div>
+                    {previewUrl ? (
+                      <div className="overflow-hidden rounded-xl border bg-black">
+                        <video
+                          key={`${clip.id}:${previewUrl}`}
+                          src={previewUrl}
+                          controls
+                          preload="metadata"
+                          playsInline
+                          className="aspect-video w-full bg-black"
+                        />
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-dashed p-4 text-xs text-gray-400">
+                        Preview unavailable right now, but the clip record exists.
+                      </div>
+                    )}
                   </div>
-
-                  {"signedUrl" in clip && clip.signedUrl ? (
-                    <video
-                      src={clip.signedUrl}
-                      controls
-                      preload="metadata"
-                      playsInline
-                      className="w-full rounded-lg border bg-black"
-                    />
-                  ) : (
-                    <p className="text-xs text-gray-400">
-                      Preview loading unavailable, but the clip record exists.
-                    </p>
-                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
