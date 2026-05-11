@@ -43,11 +43,10 @@ export async function POST(request: NextRequest) {
 
   if (mediaError) {
     return NextResponse.json(
-      { error: "Failed to create media record" },
+      { error: `Failed to create media record: ${mediaError.message}` },
       { status: 500 }
     );
   }
-
   // Upload file to Supabase Storage
   const storagePath = `${user.id}/${mediaAsset.id}/original${
     "." + file.name.split(".").pop()

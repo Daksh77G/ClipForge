@@ -1,28 +1,51 @@
-import { createClient } from "@/lib/supabase/server";
-import type { MediaAsset, ProcessingJob } from "@/types/db";
+export type MediaAssetStatus = "uploaded" | "queued" | "processing" | "completed" | "failed";
+export type JobStatus = "queued" | "processing" | "completed" | "failed";
 
-export async function getMediaAssets(userId: string): Promise<MediaAsset[]> {
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("media_assets")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  if (error) throw error;
-  return data ?? [];
+export interface MediaAsset {
+  id: string;
+  user_id: string;
+  storage_bucket: string;
+  storage_path: string;
+  original_filename: string;
+  mime_type: string;
+  file_size_bytes: number;
+  source_type: string;
+  source_url: string | null;
+  status: MediaAssetStatus;
+  created_at: string;
 }
 
-export async function getProcessingJobs(
-  mediaAssetId: string
-): Promise<ProcessingJob[]> {
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("processing_jobs")
-    .select("*")
-    .eq("media_asset_id", mediaAssetId)
-    .order("created_at", { ascending: false });
+export interface ProcessingJob {
+  id: string;
+  media_asset_id: string;
+  user_id: string;
+  job_type: string;
+  status: JobStatus;
+  progress: number;
+  step: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
-  if (error) throw error;
-  return data ?? [];
+export interface Transcript {
+  id: string;
+  job_id: string;
+  full_text: string;
+  language: string | null;
+  duration_seconds: number | null;
+  created_at: string;
+}
+
+export interface GeneratedClip {
+  id: string;
+  job_id: string;
+  user_id: string;
+  start_time: number;
+  end_time: number;
+  score: number;
+  reason: string;
+  storage_path: string | null;
+  status: string;
+  created_at: string;
 }

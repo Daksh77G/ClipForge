@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 import {
   ALLOWED_EXTENSIONS,
   formatFileSize,
@@ -11,6 +12,8 @@ import {
 
 export default function UploadForm() {
   const router = useRouter();
+  const supabase = createClient();
+
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -38,20 +41,65 @@ export default function UploadForm() {
 
     setUploading(true);
     setError(null);
-    setProgress("Uploading file...");
 
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("/api/upload", {
+    setProgress("Creating upload record...");
+    const initRes = await fetch("/api/uploads/init", {
       method: "POST",
-      body: formData,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: file.type,
+        fileSize: file.size,
+      }),
     });
 
-    const data = await res.json();
+    const initData = await initRes.json();
 
-    if (!res.ok) {
-      setError(data.error ?? "Upload failed");
+    if (!initRes.ok) {
+      setError(initData.error ?? "Failed to initialize upload");
+      setUploading(false);
+      setProgress(null);
+      return;
+    }
+
+    const { mediaAssetId, storagePath } = initData as {
+      mediaAssetId: string;
+      storagePath: string;
+    };
+
+    setProgress("Uploading file to storage...");
+    const { error: storageError } = await supabase.storage
+      .from("source-media")
+      .upload(storagePath, file, {
+        contentType: file.type,
+        upsert: false,
+      });
+
+    if (storageError) {
+      setError(`Storage upload failed: ${storageError.message}`);
+      setUploading(false);
+      setProgress(null);
+      return;
+    }
+
+    setProgress("Finalizing processing job...");
+    const finalizeRes = await fetch("/api/uploads/finalize", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mediaAssetId,
+        storagePath,
+      }),
+    });
+
+    const finalizeData = await finalizeRes.json();
+
+    if (!finalizeRes.ok) {
+      setError(finalizeData.error ?? "Failed to finalize upload");
       setUploading(false);
       setProgress(null);
       return;

@@ -12,9 +12,7 @@ function StatusBadge({ status }: { status: MediaAsset["status"] }) {
   };
 
   return (
-    <span
-      className={`rounded-full px-2 py-1 text-xs font-medium ${styles[status]}`}
-    >
+    <span className={`rounded-full px-2 py-1 text-xs font-medium ${styles[status]}`}>
       {status}
     </span>
   );
@@ -38,9 +36,10 @@ export default function UploadList({ assets }: { assets: MediaAsset[] }) {
   return (
     <div className="space-y-3">
       {assets.map((asset) => (
-        <div
+        <Link
           key={asset.id}
-          className="flex items-center justify-between rounded-xl border p-4"
+          href={`/dashboard/uploads/${asset.id}`}
+          className="flex items-center justify-between rounded-xl border p-4 hover:bg-gray-50 transition-colors"
         >
           <div>
             <p className="text-sm font-medium text-gray-900">
@@ -52,7 +51,7 @@ export default function UploadList({ assets }: { assets: MediaAsset[] }) {
             </p>
           </div>
           <StatusBadge status={asset.status} />
-        </div>
+        </Link>
       ))}
     </div>
   );
